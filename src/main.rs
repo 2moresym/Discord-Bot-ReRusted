@@ -18,21 +18,21 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 
 #[derive(Clone, Debug)]
 struct Data {
-    openrouter: Arc<OpenRouterClient>,
+    huggingface: Arc<HuggingFaceClient>,
     ai_channel_ids: HashSet<serenity::ChannelId>,
     system_prompt: Arc<String>,
 }
 
 #[derive(Clone)]
-struct OpenRouterClient {
+struct HuggingFaceClient {
     http: Client,
     api_key: String,
     model: String,
 }
 
-impl fmt::Debug for OpenRouterClient {
+impl fmt::Debug for HuggingFaceClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OpenRouterClient")
+        f.debug_struct("HuggingFaceClient")
             .field("http", &self.http)
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
@@ -40,12 +40,12 @@ impl fmt::Debug for OpenRouterClient {
     }
 }
 
-impl OpenRouterClient {
+impl HuggingFaceClient {
     fn from_env() -> Result<Self, Error> {
-        let api_key = env::var("OPENROUTER_API_KEY")
-            .map_err(|_| "OPENROUTER_API_KEY is missing from the environment")?;
-        let model = env::var("OPENROUTER_MODEL")
-            .unwrap_or_else(|_| "openrouter/free".to_owned());
+        let api_key = env::var("HF_TOKEN")
+            .map_err(|_| "HF_TOKEN is missing from the environment")?;
+        let model = env::var("HF_MODEL")
+            .unwrap_or_else(|_| "Qwen/Qwen2.5-7B-Instruct-1M:fastest".to_owned());
 
         Ok(Self {
             http: Client::new(),
@@ -71,9 +71,8 @@ impl OpenRouterClient {
 
         let response = self
             .http
-            .post("https://openrouter.ai/api/v1/chat/completions")
+            .post("https://router.huggingface.co/v1/chat/completions")
             .bearer_auth(&self.api_key)
-            .header("HTTP-Referer", "https://github.com/2moresym/Discord-Bot-ReRusted")
             .header("X-Title", "Discord Bot ReRusted")
             .json(&request)
             .send()
@@ -83,7 +82,7 @@ impl OpenRouterClient {
         let body = response.text().await?;
 
         if !status.is_success() {
-            return Err(format!("OpenRouter API returned {status}: {body}").into());
+            return Err(format!("Hugging Face API returned {status}: {body}").into());
         }
 
         let parsed: ChatResponse = serde_json::from_str(&body)?;
@@ -92,7 +91,7 @@ impl OpenRouterClient {
             .into_iter()
             .next()
             .map(|choice| sanitize_ai_response(&choice.message.content))
-            .ok_or_else(|| "OpenRouter returned no choices".into())
+            .ok_or_else(|| "Hugging Face returned no choices".into())
     }
 }
 
@@ -193,15 +192,14 @@ async fn ask(
 ) -> Result<(), Error> {
     ctx.defer().await?;
 
-    match ctx.data().openrouter.chat(&ctx.data().system_prompt, &prompt).await {
+    match ctx.data().huggingface.chat(&ctx.data().system_prompt, &prompt).await {
         Ok(answer) => {
             let answer = truncate_for_discord(&answer);
             ctx.say(answer).await?;
         }
         Err(err) => {
-            error!(error = %err, "OpenRouter request failed");
-            ctx.say("❌ The AI provider failed to answer. Check the bot logs for details.")
-                .await?;
+            error!(error = %err, "Hugging Face request failed");
+            ctx.say("the ai provider fucked up. check the logs.").await?;
         }
     }
 
@@ -231,7 +229,7 @@ async fn main() -> Result<(), Error> {
 
     let token = env::var("DISCORD_TOKEN")
         .map_err(|_| "DISCORD_TOKEN is missing from the environment")?;
-    let openrouter = Arc::new(OpenRouterClient::from_env()?);
+    let huggingface = Arc::new(HuggingFaceClient::from_env()?);
     let ai_channel_ids = load_ai_channel_ids()?;
     let system_prompt = Arc::new(load_system_prompt()?);
 
@@ -293,7 +291,7 @@ async fn main() -> Result<(), Error> {
                     let typing = new_message.channel_id.start_typing(&_ctx.http);
                     let response = tokio::time::timeout(
                         Duration::from_secs(45),
-                        data.openrouter.chat(&data.system_prompt, &prompt),
+                        data.huggingface.chat(&data.system_prompt, &prompt),
                     )
                     .await;
                     typing.stop();
@@ -304,20 +302,20 @@ async fn main() -> Result<(), Error> {
                             new_message.reply_mention(_ctx, answer).await?;
                         }
                         Ok(Err(err)) => {
-                            error!(error = %err, "OpenRouter mention reply failed");
+                            error!(error = %err, "Hugging Face mention reply failed");
                             new_message
                                 .reply_mention(
                                     _ctx,
-                                    "❌ The AI provider failed to answer. Check the bot logs for details.",
+                                    "the ai provider fucked up. check the logs.",
                                 )
                                 .await?;
                         }
                         Err(_) => {
-                            error!("OpenRouter mention reply timed out after 45 seconds");
+                            error!("Hugging Face mention reply timed out after 45 seconds");
                             new_message
                                 .reply_mention(
                                     _ctx,
-                                    "❌ The AI took too long to answer. What the fuck happened?",
+                                    "the ai took too long to answer. what the fuck happened?",
                                 )
                                 .await?;
                         }
@@ -329,7 +327,7 @@ async fn main() -> Result<(), Error> {
             ..Default::default()
         })
         .setup(move |ctx, ready, framework| {
-            let openrouter = Arc::clone(&openrouter);
+            let huggingface = Arc::clone(&huggingface);
             let ai_channel_ids = ai_channel_ids.clone();
             let system_prompt = Arc::clone(&system_prompt);
             Box::pin(async move {
@@ -339,7 +337,7 @@ async fn main() -> Result<(), Error> {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
                 Ok(Data {
-                    openrouter,
+                    huggingface,
                     ai_channel_ids,
                     system_prompt,
                 })
