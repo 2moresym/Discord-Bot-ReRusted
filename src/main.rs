@@ -211,20 +211,24 @@ async fn main() -> Result<(), Error> {
                         return Ok(());
                     }
 
-                    let Some(guild_id) = new_message.guild_id else {
-                        return Ok(());
+                    let channel_allowed = {
+                        let Some(guild_id) = new_message.guild_id else {
+                            return Ok(());
+                        };
+
+                        let Some(guild) = _ctx.cache.guild(guild_id) else {
+                            return Ok(());
+                        };
+
+                        let Some(channel) = guild.channels.get(&new_message.channel_id) else {
+                            return Ok(());
+                        };
+
+                        data.ai_channel_names
+                            .contains(&channel.name.to_ascii_lowercase())
                     };
 
-                    let Some(guild) = _ctx.cache.guild(guild_id) else {
-                        return Ok(());
-                    };
-
-                    let Some(channel) = guild.channels.get(&new_message.channel_id) else {
-                        return Ok(());
-                    };
-
-                    let channel_name = channel.name.to_ascii_lowercase();
-                    if !data.ai_channel_names.contains(&channel_name) {
+                    if !channel_allowed {
                         return Ok(());
                     }
 
