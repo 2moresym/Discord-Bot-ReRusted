@@ -17,7 +17,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 #[derive(Clone, Debug)]
 struct Data {
     openrouter: Arc<OpenRouterClient>,
-    ai_channels: HashSet<serenity::ChannelId>,
+    ai_channel_names: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -110,18 +110,14 @@ struct ChatChoice {
     message: ChatMessage,
 }
 
-fn load_ai_channels() -> Result<HashSet<serenity::ChannelId>, Error> {
-    let configured = env::var("AI_CHANNEL_IDS").unwrap_or_default();
-    let mut channels = HashSet::new();
-
-    for raw_id in configured.split(',').map(str::trim).filter(|id| !id.is_empty()) {
-        let id = raw_id
-            .parse::<u64>()
-            .map_err(|_| format!("Invalid channel ID in AI_CHANNEL_IDS: {raw_id}"))?;
-        channels.insert(serenity::ChannelId::new(id));
-    }
-
-    Ok(channels)
+fn load_ai_channel_names() -> HashSet<String> {
+    env::var("AI_CHANNEL_NAMES")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
@@ -187,15 +183,16 @@ async fn main() -> Result<(), Error> {
     let token = env::var("DISCORD_TOKEN")
         .map_err(|_| "DISCORD_TOKEN is missing from the environment")?;
     let openrouter = Arc::new(OpenRouterClient::from_env()?);
-    let ai_channels = load_ai_channels()?;
+    let ai_channel_names = load_ai_channel_names();
 
-    if ai_channels.is_empty() {
-        info!("AI mention replies are disabled because AI_CHANNEL_IDS is empty");
+    if ai_channel_names.is_empty() {
+        info!("AI mention replies are disabled because AI_CHANNEL_NAMES is empty");
     } else {
-        info!(channels = ai_channels.len(), "AI mention replies enabled");
+        info!(channels = ?ai_channel_names, "AI mention replies enabled for channel names");
     }
 
-    let intents = serenity::GatewayIntents::non_privileged();
+    let intents = serenity::GatewayIntents::non_privileged()
+        | serenity::GatewayIntents::MESSAGE_CONTENT;
     let commands = vec![ping(), ask()];
 
     let framework = poise::Framework::builder()
@@ -210,9 +207,24 @@ async fn main() -> Result<(), Error> {
                         return Ok(());
                     };
 
-                    if new_message.author.bot
-                        || !data.ai_channels.contains(&new_message.channel_id)
-                    {
+                    if new_message.author.bot {
+                        return Ok(());
+                    }
+
+                    let Some(guild_id) = new_message.guild_id else {
+                        return Ok(());
+                    };
+
+                    let Some(guild) = _ctx.cache.guild(guild_id) else {
+                        return Ok(());
+                    };
+
+                    let Some(channel) = guild.channels.get(&new_message.channel_id) else {
+                        return Ok(());
+                    };
+
+                    let channel_name = channel.name.to_ascii_lowercase();
+                    if !data.ai_channel_names.contains(&channel_name) {
                         return Ok(());
                     }
 
@@ -239,7 +251,10 @@ async fn main() -> Result<(), Error> {
                             error!(error = %err, "OpenRouter mention reply failed");
                             new_message
                                 .channel_id
-                                .say(_ctx, "❌ The AI provider failed to answer. Check the bot logs for details.")
+                                .say(
+                                    _ctx,
+                                    "❌ The AI provider failed to answer. Check the bot logs for details.",
+                                )
                                 .await?;
                         }
                     }
@@ -251,7 +266,7 @@ async fn main() -> Result<(), Error> {
         })
         .setup(move |ctx, ready, framework| {
             let openrouter = Arc::clone(&openrouter);
-            let ai_channels = ai_channels.clone();
+            let ai_channel_names = ai_channel_names.clone();
             Box::pin(async move {
                 info!(user = %ready.user.name, "Connected to Discord");
                 info!(guilds = ready.guilds.len(), "Bot is serving guilds");
@@ -260,7 +275,7 @@ async fn main() -> Result<(), Error> {
 
                 Ok(Data {
                     openrouter,
-                    ai_channels,
+                    ai_channel_names,
                 })
             })
         })
