@@ -18,6 +18,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 struct Data {
     openrouter: Arc<OpenRouterClient>,
     ai_channel_names: HashSet<String>,
+    system_prompt: String,
 }
 
 #[derive(Clone)]
@@ -52,13 +53,19 @@ impl OpenRouterClient {
         })
     }
 
-    async fn chat(&self, prompt: &str) -> Result<String, Error> {
+    async fn chat(&self, system_prompt: &str, prompt: &str) -> Result<String, Error> {
         let request = ChatRequest {
             model: self.model.clone(),
-            messages: vec![ChatMessage {
-                role: "user".to_owned(),
-                content: prompt.to_owned(),
-            }],
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: system_prompt.to_owned(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: prompt.to_owned(),
+                },
+            ],
         };
 
         let response = self
@@ -120,6 +127,12 @@ fn load_ai_channel_names() -> HashSet<String> {
         .collect()
 }
 
+fn load_system_prompt() -> String {
+    env::var("AI_SYSTEM_PROMPT").unwrap_or_else(|_| {
+        "You are Vaxxer, a friendly Discord bot. Be helpful, conversational, and concise. Keep your personality playful without being obnoxious. Do not claim to be human or have real-world experiences.".to_owned()
+    })
+}
+
 fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
     let normal = format!("<@{}>", bot_id.get());
     let nickname = format!("<@!{}>", bot_id.get());
@@ -131,20 +144,20 @@ fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
         .to_owned()
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command)]
 async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("🏓 Pong! ReRusted is alive.").await?;
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command)]
 async fn ask(
     ctx: Context<'_>,
     #[description = "What should the bot ask the AI?"] prompt: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
 
-    match ctx.data().openrouter.chat(&prompt).await {
+    match ctx.data().openrouter.chat(&ctx.data().system_prompt, &prompt).await {
         Ok(answer) => {
             let answer = truncate_for_discord(&answer);
             ctx.say(answer).await?;
@@ -184,6 +197,7 @@ async fn main() -> Result<(), Error> {
         .map_err(|_| "DISCORD_TOKEN is missing from the environment")?;
     let openrouter = Arc::new(OpenRouterClient::from_env()?);
     let ai_channel_names = load_ai_channel_names();
+    let system_prompt = load_system_prompt();
 
     if ai_channel_names.is_empty() {
         info!("AI mention replies are disabled because AI_CHANNEL_NAMES is empty");
@@ -211,11 +225,22 @@ async fn main() -> Result<(), Error> {
                         return Ok(());
                     }
 
-                    let channel_allowed = {
-                        let Some(guild_id) = new_message.guild_id else {
-                            return Ok(());
-                        };
+                    let bot_id = _ctx.cache.current_user().id;
+                    let mentioned = new_message.mentions.iter().any(|user| user.id == bot_id);
 
+                    if !mentioned {
+                        return Ok(());
+                    }
+
+                    let Some(guild_id) = new_message.guild_id else {
+                        info!(
+                            user = %new_message.author.name,
+                            "Ignoring AI mention from a DM"
+                        );
+                        return Ok(());
+                    };
+
+                    let channel_name = {
                         let Some(guild) = _ctx.cache.guild(guild_id) else {
                             return Ok(());
                         };
@@ -224,18 +249,20 @@ async fn main() -> Result<(), Error> {
                             return Ok(());
                         };
 
-                        data.ai_channel_names
-                            .contains(&channel.name.to_ascii_lowercase())
+                        channel.name.clone()
                     };
 
-                    if !channel_allowed {
-                        return Ok(());
-                    }
-
-                    let bot_id = _ctx.cache.current_user().id;
-                    let mentioned = new_message.mentions.iter().any(|user| user.id == bot_id);
-
-                    if !mentioned {
+                    if !data
+                        .ai_channel_names
+                        .contains(&channel_name.to_ascii_lowercase())
+                    {
+                        let clean_message = strip_bot_mention(&new_message.content, bot_id);
+                        info!(
+                            channel = %channel_name,
+                            user = %new_message.author.name,
+                            message = %clean_message,
+                            "AI mention ignored in non-enabled channel"
+                        );
                         return Ok(());
                     }
 
@@ -246,7 +273,7 @@ async fn main() -> Result<(), Error> {
                         prompt
                     };
 
-                    match data.openrouter.chat(&prompt).await {
+                    match data.openrouter.chat(&data.system_prompt, &prompt).await {
                         Ok(answer) => {
                             let answer = truncate_for_discord(&answer);
                             new_message.channel_id.say(_ctx, answer).await?;
@@ -271,6 +298,7 @@ async fn main() -> Result<(), Error> {
         .setup(move |ctx, ready, framework| {
             let openrouter = Arc::clone(&openrouter);
             let ai_channel_names = ai_channel_names.clone();
+            let system_prompt = system_prompt.clone();
             Box::pin(async move {
                 info!(user = %ready.user.name, "Connected to Discord");
                 info!(guilds = ready.guilds.len(), "Bot is serving guilds");
@@ -280,6 +308,7 @@ async fn main() -> Result<(), Error> {
                 Ok(Data {
                     openrouter,
                     ai_channel_names,
+                    system_prompt,
                 })
             })
         })
