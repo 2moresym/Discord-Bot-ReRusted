@@ -7,27 +7,31 @@ A Discord bot rebuilt in Rust with **Poise** and an **OpenRouter-powered AI back
 - `/ping` — checks that the bot is alive.
 - `/ask <prompt>` — sends a prompt to the configured OpenRouter model and returns the response.
 
-Commands are slash-only. Message mentions are handled separately, so `@ReRusted` is not interpreted as a prefix command.
+Commands are slash-only. Mentions are handled separately and are never treated as prefix commands.
 
 ## AI mention replies
 
 ReRusted can reply automatically when it is mentioned in selected Discord channels.
 
-Configure channel names in `.env`:
+Configure channel IDs in `.env`:
 
 ```env
-AI_CHANNEL_NAMES=ai-chat,bot-chat
+AI_CHANNEL_IDS=1363801874465161316,123456789012345678
 ```
 
-Channel names are matched case-insensitively. The bot only replies when all of these are true:
+Channel IDs are globally unique, so the list can contain channels from multiple Discord servers.
 
-1. The message is in a configured channel name.
+The bot only automatically answers when all of these are true:
+
+1. The message is in one of the configured channel IDs.
 2. The message mentions ReRusted.
 3. The message was not sent by another bot.
 
-Direct messages are ignored. An empty `AI_CHANNEL_NAMES` disables automatic mention replies.
+Direct messages are ignored. An empty `AI_CHANNEL_IDS` disables automatic mention replies.
 
-Mentions in non-enabled channels are ignored and recorded in the bot log with the channel name, author, and cleaned message text. This makes it easy to see a channel you may want to add later without spamming the channel with an error.
+Mentions in non-enabled channels are ignored and recorded in the bot log with the channel ID, author, and cleaned message text. The bot does not post an error into the non-enabled channel.
+
+Poise's mention-as-prefix behavior is explicitly disabled, so `@ReRusted hello` is handled only by the custom message event handler rather than being parsed as an unknown prefix command.
 
 Because Discord message text is delivered through the **Message Content** gateway intent, enable the Message Content Intent for the bot in the Discord Developer Portal as well as requesting it in the code.
 
@@ -61,7 +65,7 @@ Put your credentials and settings in `.env`:
 DISCORD_TOKEN=your_discord_token
 OPENROUTER_API_KEY=your_openrouter_key
 OPENROUTER_MODEL=openrouter/free
-AI_CHANNEL_NAMES=ai-chat
+AI_CHANNEL_IDS=123456789012345678,987654321098765432
 AI_CONTEXT_FILE=context.md
 ```
 
@@ -80,5 +84,7 @@ The bot uses OpenRouter's OpenAI-compatible chat-completions endpoint. The model
 ```env
 OPENROUTER_MODEL=your-model-id
 ```
+
+The application also strips the provider/model's stray `User safety=safe` line if it appears in a response, so internal metadata does not get posted into Discord.
 
 Never commit `.env` or API tokens to Git.
