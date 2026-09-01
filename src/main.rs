@@ -45,7 +45,7 @@ impl HuggingFaceClient {
         let api_key = env::var("HF_TOKEN")
             .map_err(|_| "HF_TOKEN is missing from the environment")?;
         let model = env::var("HF_MODEL")
-            .unwrap_or_else(|_| "Qwen/Qwen2.5-7B-Instruct-1M:fastest".to_owned());
+            .unwrap_or_else(|_| "openai/gpt-oss-120b:fastest".to_owned());
 
         Ok(Self {
             http: Client::new(),
