@@ -31,23 +31,23 @@ Mentions in non-enabled channels are ignored and recorded in the bot log with th
 
 Because Discord message text is delivered through the **Message Content** gateway intent, enable the Message Content Intent for the bot in the Discord Developer Portal as well as requesting it in the code.
 
-## AI personality
+## Vaxxer context
 
-The AI system prompt can be edited without changing Rust code:
+Vaxxer's personality and long-form instructions live in [`context.md`](context.md), separate from `.env`.
+
+By default the bot loads `context.md` at startup. You can point it at another file with:
 
 ```env
-AI_SYSTEM_PROMPT=You are Vaxxer, a friendly Discord bot. Be helpful, conversational, concise, and playful without being obnoxious. Do not claim to be human or have real-world experiences.
+AI_CONTEXT_FILE=context.md
 ```
 
-This prompt is used for both `/ask` and mention-triggered replies, so you can tune Vaxxxer's personality from `.env`.
+The context file is read once when the bot starts, so restart the bot after editing it.
 
 ## Requirements
 
 - Rust stable
 - A Discord bot token
 - An OpenRouter API key
-
-Poise 0.6 supports event handlers for non-command Discord events, which ReRusted uses for mention-based replies.
 
 ## Local setup
 
@@ -62,7 +62,7 @@ DISCORD_TOKEN=your_discord_token
 OPENROUTER_API_KEY=your_openrouter_key
 OPENROUTER_MODEL=openrouter/free
 AI_CHANNEL_NAMES=ai-chat
-AI_SYSTEM_PROMPT=You are Vaxxer, a friendly Discord bot. Be helpful, conversational, concise, and playful without being obnoxious. Do not claim to be human or have real-world experiences.
+AI_CONTEXT_FILE=context.md
 ```
 
 `HF_TOKEN` is included as an optional placeholder for a future fallback provider; it is not used by the current bot core.
