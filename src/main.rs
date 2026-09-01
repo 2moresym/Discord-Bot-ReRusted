@@ -155,12 +155,19 @@ fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
 }
 
 fn sanitize_ai_response(text: &str) -> String {
-    text.lines()
+    let cleaned = text
+        .lines()
         .filter(|line| !line.trim().eq_ignore_ascii_case("User safety=safe"))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
-        .to_owned()
+        .to_owned();
+
+    if cleaned.is_empty() {
+        "...the AI returned an empty response. What the fuck.".to_owned()
+    } else {
+        cleaned
+    }
 }
 
 #[poise::command(slash_command)]
