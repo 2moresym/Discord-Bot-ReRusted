@@ -219,7 +219,7 @@ async fn main() -> Result<(), Error> {
         .options(poise::FrameworkOptions {
             commands,
             on_error: |error| Box::pin(async move {
-                error!("Poise command error: {error:?}");
+                error!("Poise command error: {error}");
             }),
             event_handler: |_ctx, event, _framework, data| {
                 Box::pin(async move {
