@@ -156,14 +156,23 @@ fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
 }
 
 fn sanitize_ai_response(text: &str) -> String {
-    let cleaned = text
-        .lines()
-        .filter(|line| !line.trim().eq_ignore_ascii_case("User safety=safe"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned();
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
 
+    let has_safety_metadata = lines.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("user safety:")
+            || lower.starts_with("user safety=")
+            || lower.starts_with("safety categories:")
+            || lower.starts_with("safety categories=")
+            || lower.starts_with("response safety:")
+            || lower.starts_with("response safety=")
+    });
+
+    if has_safety_metadata {
+        return "fuck off".to_owned();
+    }
+
+    let cleaned = lines.join("\n");
     if cleaned.is_empty() {
         "...the AI returned an empty response. What the fuck.".to_owned()
     } else {
