@@ -4,6 +4,7 @@ use std::{
     fmt,
     fs,
     sync::Arc,
+    time::Duration,
 };
 
 use dotenvy::dotenv;
@@ -280,18 +281,34 @@ async fn main() -> Result<(), Error> {
                         prompt
                     };
 
-                    match data.openrouter.chat(&data.system_prompt, &prompt).await {
-                        Ok(answer) => {
+                    let typing = new_message.channel_id.start_typing(&_ctx.http);
+                    let response = tokio::time::timeout(
+                        Duration::from_secs(45),
+                        data.openrouter.chat(&data.system_prompt, &prompt),
+                    )
+                    .await;
+                    typing.stop();
+
+                    match response {
+                        Ok(Ok(answer)) => {
                             let answer = truncate_for_discord(&answer);
-                            new_message.channel_id.say(_ctx, answer).await?;
+                            new_message.reply_mention(_ctx, answer).await?;
                         }
-                        Err(err) => {
+                        Ok(Err(err)) => {
                             error!(error = %err, "OpenRouter mention reply failed");
                             new_message
-                                .channel_id
-                                .say(
+                                .reply_mention(
                                     _ctx,
                                     "❌ The AI provider failed to answer. Check the bot logs for details.",
+                                )
+                                .await?;
+                        }
+                        Err(_) => {
+                            error!("OpenRouter mention reply timed out after 45 seconds");
+                            new_message
+                                .reply_mention(
+                                    _ctx,
+                                    "❌ The AI took too long to answer. What the fuck happened?",
                                 )
                                 .await?;
                         }
