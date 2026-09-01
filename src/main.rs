@@ -11,21 +11,22 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 
 #[derive(Clone)]
 struct Data {
-    groq: Arc<GroqClient>,
+    openrouter: Arc<OpenRouterClient>,
 }
 
 #[derive(Clone)]
-struct GroqClient {
+struct OpenRouterClient {
     http: Client,
     api_key: String,
     model: String,
 }
 
-impl GroqClient {
+impl OpenRouterClient {
     fn from_env() -> Result<Self, Error> {
-        let api_key = env::var("GROQ_API_KEY")
-            .map_err(|_| "GROQ_API_KEY is missing from the environment")?;
-        let model = env::var("GROQ_MODEL").unwrap_or_else(|_| "openai/gpt-oss-20b".to_owned());
+        let api_key = env::var("OPENROUTER_API_KEY")
+            .map_err(|_| "OPENROUTER_API_KEY is missing from the environment")?;
+        let model = env::var("OPENROUTER_MODEL")
+            .unwrap_or_else(|_| "openrouter/free".to_owned());
 
         Ok(Self {
             http: Client::new(),
@@ -45,8 +46,10 @@ impl GroqClient {
 
         let response = self
             .http
-            .post("https://api.groq.com/openai/v1/chat/completions")
+            .post("https://openrouter.ai/api/v1/chat/completions")
             .bearer_auth(&self.api_key)
+            .header("HTTP-Referer", "https://github.com/2moresym/Discord-Bot-ReRusted")
+            .header("X-Title", "Discord Bot ReRusted")
             .json(&request)
             .send()
             .await?;
@@ -55,7 +58,7 @@ impl GroqClient {
         let body = response.text().await?;
 
         if !status.is_success() {
-            return Err(format!("Groq API returned {status}: {body}").into());
+            return Err(format!("OpenRouter API returned {status}: {body}").into());
         }
 
         let parsed: ChatResponse = serde_json::from_str(&body)?;
@@ -64,7 +67,7 @@ impl GroqClient {
             .into_iter()
             .next()
             .map(|choice| choice.message.content)
-            .ok_or_else(|| "Groq returned no choices".into())
+            .ok_or_else(|| "OpenRouter returned no choices".into())
     }
 }
 
@@ -99,19 +102,18 @@ async fn ping(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, prefix_command)]
 async fn ask(
     ctx: Context<'_>,
-    #[description = "What should the bot ask Groq?"] prompt: String,
+    #[description = "What should the bot ask the AI?"] prompt: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
 
-    match ctx.data().groq.chat(&prompt).await {
+    match ctx.data().openrouter.chat(&prompt).await {
         Ok(answer) => {
-            // Discord messages have a 2000-character limit.
             let answer = truncate_for_discord(&answer);
             ctx.say(answer).await?;
         }
         Err(err) => {
-            error!(error = %err, "Groq request failed");
-            ctx.say("❌ Groq failed to answer. Check the bot logs for details.")
+            error!(error = %err, "OpenRouter request failed");
+            ctx.say("❌ The AI provider failed to answer. Check the bot logs for details.")
                 .await?;
         }
     }
@@ -142,7 +144,7 @@ async fn main() -> Result<(), Error> {
 
     let token = env::var("DISCORD_TOKEN")
         .map_err(|_| "DISCORD_TOKEN is missing from the environment")?;
-    let groq = Arc::new(GroqClient::from_env()?);
+    let openrouter = Arc::new(OpenRouterClient::from_env()?);
 
     let intents = serenity::GatewayIntents::non_privileged();
     let commands = vec![ping(), ask()];
@@ -156,16 +158,14 @@ async fn main() -> Result<(), Error> {
             ..Default::default()
         })
         .setup(move |ctx, ready, framework| {
-            let groq = Arc::clone(&groq);
+            let openrouter = Arc::clone(&openrouter);
             Box::pin(async move {
                 info!(user = %ready.user.name, "Connected to Discord");
                 info!(guilds = ready.guilds.len(), "Bot is serving guilds");
 
-                // Register slash commands globally. Discord may take up to an hour
-                // to propagate global command changes.
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
-                Ok(Data { groq })
+                Ok(Data { openrouter })
             })
         })
         .build();
