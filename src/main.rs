@@ -9,12 +9,12 @@ use tracing::{error, info};
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Data {
     openrouter: Arc<OpenRouterClient>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct OpenRouterClient {
     http: Client,
     api_key: String,
