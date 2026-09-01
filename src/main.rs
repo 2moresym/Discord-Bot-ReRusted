@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     env,
     fmt,
+    fs,
     sync::Arc,
 };
 
@@ -18,7 +19,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 struct Data {
     openrouter: Arc<OpenRouterClient>,
     ai_channel_names: HashSet<String>,
-    system_prompt: String,
+    system_prompt: Arc<String>,
 }
 
 #[derive(Clone)]
@@ -28,7 +29,6 @@ struct OpenRouterClient {
     model: String,
 }
 
-// Never expose the API key through Debug output.
 impl fmt::Debug for OpenRouterClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenRouterClient")
@@ -127,10 +127,16 @@ fn load_ai_channel_names() -> HashSet<String> {
         .collect()
 }
 
-fn load_system_prompt() -> String {
-    env::var("AI_SYSTEM_PROMPT").unwrap_or_else(|_| {
-        "You are Vaxxer, a friendly Discord bot. Be helpful, conversational, and concise. Keep your personality playful without being obnoxious. Do not claim to be human or have real-world experiences.".to_owned()
-    })
+fn load_system_prompt() -> Result<String, Error> {
+    let path = env::var("AI_CONTEXT_FILE").unwrap_or_else(|_| "context.md".to_owned());
+    let prompt = fs::read_to_string(&path)
+        .map_err(|err| format!("Failed to read AI context file '{path}': {err}"))?;
+
+    if prompt.trim().is_empty() {
+        return Err(format!("AI context file '{path}' is empty").into());
+    }
+
+    Ok(prompt)
 }
 
 fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
@@ -197,7 +203,7 @@ async fn main() -> Result<(), Error> {
         .map_err(|_| "DISCORD_TOKEN is missing from the environment")?;
     let openrouter = Arc::new(OpenRouterClient::from_env()?);
     let ai_channel_names = load_ai_channel_names();
-    let system_prompt = load_system_prompt();
+    let system_prompt = Arc::new(load_system_prompt()?);
 
     if ai_channel_names.is_empty() {
         info!("AI mention replies are disabled because AI_CHANNEL_NAMES is empty");
@@ -298,7 +304,7 @@ async fn main() -> Result<(), Error> {
         .setup(move |ctx, ready, framework| {
             let openrouter = Arc::clone(&openrouter);
             let ai_channel_names = ai_channel_names.clone();
-            let system_prompt = system_prompt.clone();
+            let system_prompt = Arc::clone(&system_prompt);
             Box::pin(async move {
                 info!(user = %ready.user.name, "Connected to Discord");
                 info!(guilds = ready.guilds.len(), "Bot is serving guilds");
