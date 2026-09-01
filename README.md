@@ -1,11 +1,11 @@
 # Discord Bot ReRusted 🦀
 
-A Discord bot rebuilt in Rust with **Poise** and an **OpenRouter-powered AI backend**.
+A Discord bot rebuilt in Rust with **Poise** and a **Hugging Face Inference Providers AI backend**.
 
 ## Current commands
 
 - `/ping` — checks that the bot is alive.
-- `/ask <prompt>` — sends a prompt to the configured OpenRouter model and returns the response.
+- `/ask <prompt>` — sends a prompt to the configured Hugging Face model and returns the response.
 
 Commands are slash-only. Mentions are handled separately and are never treated as prefix commands.
 
@@ -51,7 +51,7 @@ The context file is read once when the bot starts, so restart the bot after edit
 
 - Rust stable
 - A Discord bot token
-- An OpenRouter API key
+- A Hugging Face token with **Inference Providers** permission
 
 ## Local setup
 
@@ -63,13 +63,11 @@ Put your credentials and settings in `.env`:
 
 ```env
 DISCORD_TOKEN=your_discord_token
-OPENROUTER_API_KEY=your_openrouter_key
-OPENROUTER_MODEL=openrouter/free
+HF_TOKEN=your_huggingface_token
+HF_MODEL=Qwen/Qwen2.5-7B-Instruct-1M:fastest
 AI_CHANNEL_IDS=123456789012345678,987654321098765432
 AI_CONTEXT_FILE=context.md
 ```
-
-`HF_TOKEN` is included as an optional placeholder for a future fallback provider; it is not used by the current bot core.
 
 Then run:
 
@@ -79,12 +77,14 @@ cargo run
 
 ## AI provider
 
-The bot uses OpenRouter's OpenAI-compatible chat-completions endpoint. The model can be changed without recompiling:
+The bot uses Hugging Face's OpenAI-compatible Inference Providers chat-completions endpoint at `https://router.huggingface.co/v1/chat/completions`. Hugging Face documents that endpoint as a drop-in chat API using a bearer `HF_TOKEN`; adding `:fastest` to a model selects the fastest available provider for that model. citeturn337883search0turn337883search4
+
+The model can be changed without recompiling:
 
 ```env
-OPENROUTER_MODEL=your-model-id
+HF_MODEL=your-model-id:fastest
 ```
 
-The application also strips the provider/model's stray `User safety=safe` line if it appears in a response, so internal metadata does not get posted into Discord.
+The application strips leaked safety-classifier metadata such as `User Safety:` / `Safety Categories:` lines instead of posting those internal-looking labels into Discord.
 
 Never commit `.env` or API tokens to Git.
