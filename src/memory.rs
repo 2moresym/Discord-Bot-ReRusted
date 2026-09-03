@@ -147,13 +147,33 @@ impl MemoryStore {
         role: impl Into<String>,
         content: impl Into<String>,
     ) -> io::Result<()> {
+        let scope = scope.into();
+        let user_id = user_id.into();
+        let role = role.into();
+        let content = content.into();
+
         self.messages.push(MemoryMessage {
-            scope: scope.into(),
-            user_id: user_id.into(),
-            role: role.into(),
+            scope: scope.clone(),
+            user_id: user_id.clone(),
+            role: role.clone(),
             timestamp: unix_timestamp(),
-            content: content.into(),
+            content: content.clone(),
         });
+
+        if role == "user" && should_auto_remember(&content) {
+            let already_saved = self.memories.iter().any(|memory| {
+                memory.user_id == user_id && memory.content.eq_ignore_ascii_case(&content)
+            });
+
+            if !already_saved {
+                self.memories.push(LongTermMemory {
+                    scope: format!("user:{user_id}"),
+                    user_id,
+                    timestamp: unix_timestamp(),
+                    content,
+                });
+            }
+        }
 
         self.compact_messages();
         self.save()
@@ -165,12 +185,23 @@ impl MemoryStore {
         user_id: impl Into<String>,
         content: impl Into<String>,
     ) -> io::Result<()> {
-        self.memories.push(LongTermMemory {
-            scope: scope.into(),
-            user_id: user_id.into(),
-            timestamp: unix_timestamp(),
-            content: content.into(),
+        let scope = scope.into();
+        let user_id = user_id.into();
+        let content = content.into();
+
+        let already_saved = self.memories.iter().any(|memory| {
+            memory.user_id == user_id && memory.content.eq_ignore_ascii_case(&content)
         });
+
+        if !already_saved {
+            self.memories.push(LongTermMemory {
+                scope,
+                user_id,
+                timestamp: unix_timestamp(),
+                content,
+            });
+        }
+
         self.save()
     }
 
@@ -252,6 +283,36 @@ impl MemoryStore {
         drop(file);
         fs::rename(temp, &self.path)
     }
+}
+
+fn should_auto_remember(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.len() < 8 || lower.len() > 300 {
+        return false;
+    }
+
+    let markers = [
+        "my name is ",
+        "my favorite ",
+        "my favourite ",
+        "i like ",
+        "i love ",
+        "i hate ",
+        "i prefer ",
+        "i use ",
+        "i'm using ",
+        "i am using ",
+        "i code in ",
+        "i program in ",
+        "i live in ",
+        "i'm from ",
+        "i am from ",
+        "i work with ",
+        "remember that ",
+        "remember this ",
+    ];
+
+    markers.iter().any(|marker| lower.contains(marker))
 }
 
 fn unix_timestamp() -> u64 {
