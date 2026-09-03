@@ -38,22 +38,29 @@ Because Discord message text is delivered through the **Message Content** gatewa
 
 ## VxMem
 
-Vaxxer has a local memory store named **VxMem** using the custom `.vxm` format.
+Vaxxer has a local memory system named **VxMem** using the custom `.vxm` format.
 
-By default, for this project we recommend keeping it outside the repository:
+Recommended local storage for this machine:
 
 ```env
 VXM_PATH=/home/vexx/.local/share/rerusted/memory.vxm
 VXM_HISTORY_LIMIT=50
+VXM_MAX_MESSAGES=10000
 ```
 
-The `.vxm` file stores recent conversation messages separately for each DM/user or guild channel, plus long-term facts. User messages that look like durable personal facts are automatically promoted to long-term memory without making another AI request.
+`VXM_HISTORY_LIMIT` controls how many newest messages from the active conversation are always included. `VXM_MAX_MESSAGES` controls how many messages are retained on disk per conversation scope. Older retained messages are not automatically sent to the AI; VxMem searches them and selects relevant matches for the current prompt.
 
-VXM/2 is human-readable. Strings use normal quoted/escaped text so the file can be inspected and edited in a text editor. Existing VXM/1 files are still readable and are converted to VXM/2 the next time VxMem saves.
+VxMem maintains three useful layers:
 
-The file is local-only and is intentionally ignored by Git. It is written through a temporary file and rename so a partial write is less likely to destroy the existing memory file.
+1. **Recent context** — the newest messages from the current DM or guild channel.
+2. **Relevant history** — older messages from the same conversation ranked using token overlap and recency.
+3. **Long-term memory** — durable user facts with importance scores and duplicate detection.
 
-VxMem is loaded when the bot starts and saved whenever memory changes.
+Personal facts can be promoted automatically from normal user messages without spending another AI request. `/remember <fact>` is still available for facts that should be stored explicitly.
+
+The current VxMem format is **VXM/3** and is human-readable. Strings use normal quoted/escaped text, timestamps and importance are visible, and the file can be inspected in a text editor. Existing VXM/1 and VXM/2 files are still readable and are rewritten as VXM/3 on the next save.
+
+VxMem creates missing parent directories, saves through a temporary file and rename, and keeps the memory store outside Git. The `.vxm` file is intentionally ignored by the repository.
 
 ## Vaxxer context
 
@@ -88,6 +95,7 @@ HF_MODEL=openai/gpt-oss-120b:fastest
 AI_CHANNEL_IDS=123456789012345678,987654321098765432
 VXM_PATH=/home/vexx/.local/share/rerusted/memory.vxm
 VXM_HISTORY_LIMIT=50
+VXM_MAX_MESSAGES=10000
 AI_CONTEXT_FILE=context.md
 ```
 
