@@ -1,11 +1,12 @@
 # Discord Bot ReRusted 🦀
 
-A Discord bot rebuilt in Rust with **Poise** and a **Hugging Face Inference Providers AI backend**.
+A Discord bot rebuilt in Rust with **Poise** and a Hugging Face Inference Providers AI backend.
 
 ## Current commands
 
 - `/ping` — checks that the bot is alive.
 - `/ask <prompt>` — sends a prompt to the configured Hugging Face model and returns the response.
+- `/remember <fact>` — stores a user-specific fact in local VxMem storage.
 
 Commands are slash-only. Mentions are handled separately and are never treated as prefix commands.
 
@@ -27,13 +28,30 @@ The bot only automatically answers when all of these are true:
 2. The message mentions ReRusted.
 3. The message was not sent by another bot.
 
-Direct messages are ignored. An empty `AI_CHANNEL_IDS` disables automatic mention replies.
+Direct messages are always AI-enabled and do not require a mention. An empty `AI_CHANNEL_IDS` disables automatic guild mention replies but does not disable DMs.
 
-Mentions in non-enabled channels are ignored and recorded in the bot log with the channel ID, author, and cleaned message text. The bot does not post an error into the non-enabled channel.
+Mentions in non-enabled guild channels are ignored and recorded in the bot log with the channel ID, author, and cleaned message text. The bot does not post an error into the non-enabled channel.
 
 Poise's mention-as-prefix behavior is explicitly disabled, so `@ReRusted hello` is handled only by the custom message event handler rather than being parsed as an unknown prefix command.
 
 Because Discord message text is delivered through the **Message Content** gateway intent, enable the Message Content Intent for the bot in the Discord Developer Portal as well as requesting it in the code.
+
+## VxMem
+
+Vaxxer has a local memory store named **VxMem** using the custom `.vxm` format.
+
+By default:
+
+```env
+VXM_PATH=memory.vxm
+VXM_HISTORY_LIMIT=8
+```
+
+The `.vxm` file stores recent conversation messages separately for each DM/user or guild channel, plus explicit long-term facts created with `/remember`.
+
+The file is local-only and is intentionally ignored by Git. It is written through a temporary file and rename so a partial write is less likely to destroy the existing memory file.
+
+VxMem is loaded when the bot starts and saved whenever memory changes.
 
 ## Vaxxer context
 
@@ -64,8 +82,10 @@ Put your credentials and settings in `.env`:
 ```env
 DISCORD_TOKEN=your_discord_token
 HF_TOKEN=your_huggingface_token
-HF_MODEL=Qwen/Qwen2.5-7B-Instruct-1M:fastest
+HF_MODEL=openai/gpt-oss-120b:fastest
 AI_CHANNEL_IDS=123456789012345678,987654321098765432
+VXM_PATH=memory.vxm
+VXM_HISTORY_LIMIT=8
 AI_CONTEXT_FILE=context.md
 ```
 
@@ -77,14 +97,12 @@ cargo run
 
 ## AI provider
 
-The bot uses Hugging Face's OpenAI-compatible Inference Providers chat-completions endpoint at `https://router.huggingface.co/v1/chat/completions`. Hugging Face documents that endpoint as a drop-in chat API using a bearer `HF_TOKEN`; adding `:fastest` to a model selects the fastest available provider for that model. citeturn337883search0turn337883search4
-
-The model can be changed without recompiling:
+The bot uses Hugging Face's OpenAI-compatible Inference Providers chat-completions endpoint. The model can be changed without recompiling:
 
 ```env
 HF_MODEL=your-model-id:fastest
 ```
 
-The application strips leaked safety-classifier metadata such as `User Safety:` / `Safety Categories:` lines instead of posting those internal-looking labels into Discord.
+The application strips leaked safety-classifier metadata such as `User Safety:` / `Safety Categories:` lines instead of posting those internal-looking labels into Discord. When such metadata is returned, Vaxxer replies with `fuck off`.
 
-Never commit `.env` or API tokens to Git.
+Never commit `.env`, `memory.vxm`, or API tokens to Git.
