@@ -21,44 +21,56 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 
 #[derive(Clone, Debug)]
 struct Data {
-    huggingface: Arc<HuggingFaceClient>,
+    cerebras: Arc<CerebrasClient>,
     ai_channel_ids: HashSet<serenity::ChannelId>,
     system_prompt: Arc<String>,
     memory: Arc<Mutex<MemoryStore>>,
 }
 
 #[derive(Clone)]
-struct HuggingFaceClient {
+struct CerebrasClient {
     http: Client,
     api_key: String,
     model: String,
+    reasoning_effort: String,
+    max_completion_tokens: u32,
 }
 
-impl fmt::Debug for HuggingFaceClient {
+impl fmt::Debug for CerebrasClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HuggingFaceClient")
+        f.debug_struct("CerebrasClient")
             .field("http", &self.http)
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("max_completion_tokens", &self.max_completion_tokens)
             .finish()
     }
 }
 
-impl HuggingFaceClient {
+impl CerebrasClient {
     fn from_env() -> Result<Self, Error> {
-        let api_key = env::var("HF_TOKEN")
-            .map_err(|_| "HF_TOKEN is missing from the environment")?;
-        let model = env::var("HF_MODEL")
-            .unwrap_or_else(|_| "openai/gpt-oss-120b:fastest".to_owned());
+        let api_key = env::var("CEREBRAS_API_KEY")
+            .map_err(|_| "CEREBRAS_API_KEY is missing from the environment")?;
+        let model = env::var("CEREBRAS_MODEL")
+            .unwrap_or_else(|_| "gpt-oss-120b".to_owned());
+        let reasoning_effort = env::var("CEREBRAS_REASONING_EFFORT")
+            .unwrap_or_else(|_| "medium".to_owned());
+        let max_completion_tokens = env::var("CEREBRAS_MAX_COMPLETION_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(512);
 
         Ok(Self {
             http: Client::new(),
             api_key,
             model,
+            reasoning_effort,
+            max_completion_tokens,
         })
     }
 
-    async fn chat(&self, system_prompt: &str, prompt: &str) -> Result<String, Error> {
+    async fn chat(&self, system_prompt: &str, prompt: &str, user_id: &str) -> Result<String, Error> {
         let request = ChatRequest {
             model: self.model.clone(),
             messages: vec![
@@ -71,13 +83,17 @@ impl HuggingFaceClient {
                     content: prompt.to_owned(),
                 },
             ],
+            reasoning_effort: Some(self.reasoning_effort.clone()),
+            max_completion_tokens: Some(self.max_completion_tokens),
+            temperature: Some(0.7),
+            user: Some(user_id.to_owned()),
         };
 
         let response = self
             .http
-            .post("https://router.huggingface.co/v1/chat/completions")
+            .post("https://api.cerebras.ai/v1/chat/completions")
             .bearer_auth(&self.api_key)
-            .header("X-Title", "Discord Bot ReRusted")
+            .header("Content-Type", "application/json")
             .json(&request)
             .send()
             .await?;
@@ -86,7 +102,7 @@ impl HuggingFaceClient {
         let body = response.text().await?;
 
         if !status.is_success() {
-            return Err(format!("Hugging Face API returned {status}: {body}").into());
+            return Err(format!("Cerebras API returned {status}: {body}").into());
         }
 
         let parsed: ChatResponse = serde_json::from_str(&body)?;
@@ -95,7 +111,7 @@ impl HuggingFaceClient {
             .into_iter()
             .next()
             .map(|choice| sanitize_ai_response(&choice.message.content))
-            .ok_or_else(|| "Hugging Face returned no choices".into())
+            .ok_or_else(|| "Cerebras returned no choices".into())
     }
 }
 
@@ -103,6 +119,14 @@ impl HuggingFaceClient {
 struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -174,7 +198,11 @@ fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
 }
 
 fn sanitize_ai_response(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
 
     let has_safety_metadata = lines.iter().any(|line| {
         let lower = line.to_ascii_lowercase();
@@ -206,12 +234,8 @@ fn conversation_scope(message: &serenity::Message) -> String {
     }
 }
 
-fn build_memory_context(memory: &MemoryStore, scope: &str, user_id: &str, prompt: &str) -> String {
-    memory.relevant_context(scope, user_id, prompt, 12, 16, 14_000)
-}
-
-fn build_prompt(memory: &MemoryStore, scope: &str, user_id: &str, prompt: &str) -> String {
-    let memory_context = build_memory_context(memory, scope, user_id, prompt);
+fn build_prompt(memory: &mut MemoryStore, scope: &str, user_id: &str, prompt: &str) -> String {
+    let memory_context = memory.relevant_context(scope, user_id, prompt, 12, 16, 14_000);
     if memory_context.is_empty() {
         return prompt.to_owned();
     }
@@ -238,6 +262,27 @@ fn remember_message(
     }
 }
 
+async fn generate_reply(
+    memory: &Arc<Mutex<MemoryStore>>,
+    ai: &CerebrasClient,
+    system_prompt: &str,
+    scope: &str,
+    user_id: &str,
+    prompt: &str,
+) -> Result<String, Error> {
+    let prompt_with_memory = {
+        let mut store = memory.lock().map_err(|_| "VxMem lock is poisoned")?;
+        build_prompt(&mut store, scope, user_id, prompt)
+    };
+
+    remember_message(memory, scope, user_id, "user", prompt);
+
+    let answer = ai.chat(system_prompt, &prompt_with_memory, user_id).await?;
+    let answer = truncate_for_discord(&answer);
+    remember_message(memory, scope, user_id, "assistant", &answer);
+    Ok(answer)
+}
+
 #[poise::command(slash_command)]
 async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("🏓 Pong! ReRusted is alive.").await?;
@@ -253,7 +298,7 @@ async fn remember(
     let scope = format!("user:{user_id}");
 
     match ctx.data().memory.lock() {
-        Ok(mut memory) => memory.remember_fact(&scope, &user_id, fact.clone())?,
+        Ok(mut memory) => memory.remember_fact(&scope, &user_id, fact)?,
         Err(_) => return Err("VxMem lock is poisoned".into()),
     }
 
@@ -265,32 +310,26 @@ async fn remember(
 #[poise::command(slash_command)]
 async fn ask(
     ctx: Context<'_>,
-    #[description = "What should the bot ask the AI?"] prompt: String,
+    #[description = "What should Vaxxer ask the AI?"] prompt: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
 
     let scope = format!("channel:{}", ctx.channel_id().get());
     let user_id = ctx.author().id.get().to_string();
-    let prompt_with_memory = {
-        let memory = ctx.data().memory.lock().map_err(|_| "VxMem lock is poisoned")?;
-        build_prompt(&memory, &scope, &user_id, &prompt)
-    };
 
-    remember_message(&ctx.data().memory, &scope, &user_id, "user", &prompt);
-
-    match ctx
-        .data()
-        .huggingface
-        .chat(&ctx.data().system_prompt, &prompt_with_memory)
-        .await
+    match generate_reply(
+        &ctx.data().memory,
+        &ctx.data().cerebras,
+        &ctx.data().system_prompt,
+        &scope,
+        &user_id,
+        &prompt,
+    )
+    .await
     {
-        Ok(answer) => {
-            let answer = truncate_for_discord(&answer);
-            remember_message(&ctx.data().memory, &scope, &user_id, "assistant", &answer);
-            ctx.say(answer).await?;
-        }
+        Ok(answer) => ctx.say(answer).await?,
         Err(err) => {
-            error!(error = %err, "Hugging Face request failed");
+            error!(error = %err, "Cerebras slash-command request failed");
             ctx.say("the ai provider fucked up. check the logs.").await?;
         }
     }
@@ -321,7 +360,7 @@ async fn main() -> Result<(), Error> {
 
     let token = env::var("DISCORD_TOKEN")
         .map_err(|_| "DISCORD_TOKEN is missing from the environment")?;
-    let huggingface = Arc::new(HuggingFaceClient::from_env()?);
+    let cerebras = Arc::new(CerebrasClient::from_env()?);
     let ai_channel_ids = load_ai_channel_ids()?;
     let system_prompt = Arc::new(load_system_prompt()?);
     let memory = Arc::new(Mutex::new(load_memory_store()?));
@@ -361,56 +400,59 @@ async fn main() -> Result<(), Error> {
                     let scope = conversation_scope(&new_message);
                     let user_id = new_message.author.id.get().to_string();
 
-                    let Some(_guild_id) = new_message.guild_id else {
+                    if new_message.guild_id.is_none() {
                         if new_message.content.trim().is_empty() {
                             return Ok(());
                         }
 
-                        let prompt = new_message.content.clone();
-                        let prompt_with_memory = {
-                            let memory = data.memory.lock().map_err(|_| "VxMem lock is poisoned")?;
-                            build_prompt(&memory, &scope, &user_id, &prompt)
-                        };
-                        remember_message(&data.memory, &scope, &user_id, "user", &prompt);
-
                         let typing = new_message.channel_id.start_typing(&_ctx.http);
                         let response = tokio::time::timeout(
                             Duration::from_secs(45),
-                            data.huggingface.chat(&data.system_prompt, &prompt_with_memory),
+                            generate_reply(
+                                &data.memory,
+                                &data.cerebras,
+                                &data.system_prompt,
+                                &scope,
+                                &user_id,
+                                &new_message.content,
+                            ),
                         )
                         .await;
                         typing.stop();
 
                         match response {
                             Ok(Ok(answer)) => {
-                                let answer = truncate_for_discord(&answer);
-                                remember_message(&data.memory, &scope, &user_id, "assistant", &answer);
                                 new_message.channel_id.say(&_ctx.http, &answer).await?;
                             }
                             Ok(Err(err)) => {
-                                error!(error = %err, "Hugging Face DM reply failed");
-                                new_message.channel_id.say(&_ctx.http, "the ai provider fucked up. check the logs.").await?;
+                                error!(error = %err, "Cerebras DM reply failed");
+                                new_message
+                                    .channel_id
+                                    .say(&_ctx.http, "the ai provider fucked up. check the logs.")
+                                    .await?;
                             }
                             Err(_) => {
-                                error!("Hugging Face DM reply timed out after 45 seconds");
-                                new_message.channel_id.say(&_ctx.http, "the ai took too long to answer. what the fuck happened?").await?;
+                                error!("Cerebras DM reply timed out after 45 seconds");
+                                new_message
+                                    .channel_id
+                                    .say(&_ctx.http, "the ai took too long to answer. what the fuck happened?")
+                                    .await?;
                             }
                         }
-                        return Ok(());
-                    };
 
-                    if !mentioned {
                         return Ok(());
                     }
 
-                    if !data.ai_channel_ids.contains(&new_message.channel_id) {
-                        let clean_message = strip_bot_mention(&new_message.content, bot_id);
-                        info!(
-                            channel_id = %new_message.channel_id.get(),
-                            user = %new_message.author.name,
-                            message = %clean_message,
-                            "AI mention ignored in non-enabled channel"
-                        );
+                    if !mentioned || !data.ai_channel_ids.contains(&new_message.channel_id) {
+                        if mentioned && !data.ai_channel_ids.contains(&new_message.channel_id) {
+                            let clean_message = strip_bot_mention(&new_message.content, bot_id);
+                            info!(
+                                channel_id = %new_message.channel_id.get(),
+                                user = %new_message.author.name,
+                                message = %clean_message,
+                                "AI mention ignored in non-enabled channel"
+                            );
+                        }
                         return Ok(());
                     }
 
@@ -420,33 +462,37 @@ async fn main() -> Result<(), Error> {
                     } else {
                         prompt
                     };
-                    let prompt_with_memory = {
-                        let memory = data.memory.lock().map_err(|_| "VxMem lock is poisoned")?;
-                        build_prompt(&memory, &scope, &user_id, &prompt)
-                    };
-                    remember_message(&data.memory, &scope, &user_id, "user", &prompt);
 
                     let typing = new_message.channel_id.start_typing(&_ctx.http);
                     let response = tokio::time::timeout(
                         Duration::from_secs(45),
-                        data.huggingface.chat(&data.system_prompt, &prompt_with_memory),
+                        generate_reply(
+                            &data.memory,
+                            &data.cerebras,
+                            &data.system_prompt,
+                            &scope,
+                            &user_id,
+                            &prompt,
+                        ),
                     )
                     .await;
                     typing.stop();
 
                     match response {
                         Ok(Ok(answer)) => {
-                            let answer = truncate_for_discord(&answer);
-                            remember_message(&data.memory, &scope, &user_id, "assistant", &answer);
                             new_message.reply_mention(_ctx, answer).await?;
                         }
                         Ok(Err(err)) => {
-                            error!(error = %err, "Hugging Face mention reply failed");
-                            new_message.reply_mention(_ctx, "the ai provider fucked up. check the logs.").await?;
+                            error!(error = %err, "Cerebras mention reply failed");
+                            new_message
+                                .reply_mention(_ctx, "the ai provider fucked up. check the logs.")
+                                .await?;
                         }
                         Err(_) => {
-                            error!("Hugging Face mention reply timed out after 45 seconds");
-                            new_message.reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?").await?;
+                            error!("Cerebras mention reply timed out after 45 seconds");
+                            new_message
+                                .reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?")
+                                .await?;
                         }
                     }
 
@@ -456,7 +502,7 @@ async fn main() -> Result<(), Error> {
             ..Default::default()
         })
         .setup(move |ctx, ready, framework| {
-            let huggingface = Arc::clone(&huggingface);
+            let cerebras = Arc::clone(&cerebras);
             let ai_channel_ids = ai_channel_ids.clone();
             let system_prompt = Arc::clone(&system_prompt);
             let memory = Arc::clone(&memory);
@@ -464,11 +510,12 @@ async fn main() -> Result<(), Error> {
                 info!(user = %ready.user.name, "Connected to Discord");
                 info!(guilds = ready.guilds.len(), "Bot is serving guilds");
                 info!(path = ?memory.lock().map_err(|_| "VxMem lock is poisoned")?.path(), "VxMem loaded");
+                info!(model = %cerebras.model, reasoning = %cerebras.reasoning_effort, "Cerebras backend ready");
 
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
                 Ok(Data {
-                    huggingface,
+                    cerebras,
                     ai_channel_ids,
                     system_prompt,
                     memory,
