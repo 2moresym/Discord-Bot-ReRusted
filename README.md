@@ -61,7 +61,7 @@ Personal facts can be promoted automatically from normal user messages without a
 
 The current format is **VXM/4** and is human-readable. Existing VXM/1, VXM/2, and VXM/3 files remain readable and are rewritten in VXM/4 on the next save.
 
-The store creates missing parent directories, writes through a temporary file before rename, and stays outside Git. The actual `.vxm` memory file is intentionally ignored by the repository.
+The store creates missing parent directories, writes through a temporary file and rename, and stays outside Git. The actual `.vxm` memory file is intentionally ignored by the repository.
 
 ## Vaxxer context
 
@@ -104,7 +104,7 @@ cargo run
 
 ## AI provider
 
-The bot uses Cerebras' OpenAI-compatible chat-completions API at `https://api.cerebras.ai/v1/chat/completions`. The default model is `gpt-oss-120b`. Cerebras currently documents `gpt-oss-120b` reasoning controls for `low`, `medium`, and `high`; the bot exposes that setting through `CEREBRAS_REASONING_EFFORT`. Completion length is bounded through `CEREBRAS_MAX_COMPLETION_TOKENS`. citeturn306531view0
+The bot uses Cerebras' OpenAI-compatible chat-completions API at `https://api.cerebras.ai/v1/chat/completions`. The default model is `gpt-oss-120b`. Cerebras documents `gpt-oss-120b` reasoning controls for `low`, `medium`, and `high`; the bot exposes that setting through `CEREBRAS_REASONING_EFFORT`. Completion length is bounded through `CEREBRAS_MAX_COMPLETION_TOKENS`.
 
 ## Safety metadata handling
 
