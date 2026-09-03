@@ -1,13 +1,16 @@
+mod memory;
+
 use std::{
     collections::HashSet,
     env,
     fmt,
     fs,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use dotenvy::dotenv;
+use memory::MemoryStore;
 use poise::serenity_prelude as serenity;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,7 @@ struct Data {
     huggingface: Arc<HuggingFaceClient>,
     ai_channel_ids: HashSet<serenity::ChannelId>,
     system_prompt: Arc<String>,
+    memory: Arc<Mutex<MemoryStore>>,
 }
 
 #[derive(Clone)]
@@ -143,6 +147,16 @@ fn load_system_prompt() -> Result<String, Error> {
     Ok(prompt)
 }
 
+fn load_memory_store() -> Result<MemoryStore, Error> {
+    let path = env::var("VXM_PATH").unwrap_or_else(|_| "memory.vxm".to_owned());
+    let history_limit = env::var("VXM_HISTORY_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(8);
+
+    Ok(MemoryStore::load(path, history_limit)?)
+}
+
 fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
     let normal = format!("<@{}>", bot_id.get());
     let nickname = format!("<@!{}>", bot_id.get());
@@ -179,9 +193,96 @@ fn sanitize_ai_response(text: &str) -> String {
     }
 }
 
+fn conversation_scope(message: &serenity::Message) -> String {
+    if message.guild_id.is_some() {
+        format!("channel:{}", message.channel_id.get())
+    } else {
+        format!("dm:{}", message.author.id.get())
+    }
+}
+
+fn build_memory_context(memory: &MemoryStore, scope: &str, user_id: &str) -> String {
+    let recent = memory.recent_context(scope);
+    let long_term = memory.memories_for(scope, user_id);
+
+    let mut context = String::new();
+
+    if !long_term.is_empty() {
+        context.push_str("Known memories:\n");
+        for item in long_term.iter().rev().take(12).rev() {
+            context.push_str("- ");
+            context.push_str(&item.content);
+            context.push('\n');
+        }
+    }
+
+    if !recent.is_empty() {
+        if !context.is_empty() {
+            context.push('\n');
+        }
+        context.push_str("Recent conversation:\n");
+        for item in recent {
+            context.push_str(match item.role.as_str() {
+                "assistant" => "Vaxxer: ",
+                _ => "User: ",
+            });
+            context.push_str(&item.content);
+            context.push('\n');
+        }
+    }
+
+    context
+}
+
+fn build_prompt(memory: &MemoryStore, scope: &str, user_id: &str, prompt: &str) -> String {
+    let memory_context = build_memory_context(memory, scope, user_id);
+    if memory_context.is_empty() {
+        return prompt.to_owned();
+    }
+
+    format!(
+        "Use the following memory only when relevant. Do not mention the memory system unless asked.\n\n{memory_context}\nCurrent message:\n{prompt}"
+    )
+}
+
+fn remember_message(
+    memory: &Arc<Mutex<MemoryStore>>,
+    scope: &str,
+    user_id: &str,
+    role: &str,
+    content: &str,
+) {
+    match memory.lock() {
+        Ok(mut store) => {
+            if let Err(err) = store.remember_message(scope, user_id, role, content) {
+                error!(error = %err, path = ?store.path(), "Failed to save VxMem message");
+            }
+        }
+        Err(err) => error!(error = %err, "VxMem lock poisoned"),
+    }
+}
+
 #[poise::command(slash_command)]
 async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("🏓 Pong! ReRusted is alive.").await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+async fn remember(
+    ctx: Context<'_>,
+    #[description = "A fact Vaxxer should remember about you"] fact: String,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id.get().to_string();
+    let scope = format!("user:{user_id}");
+
+    match ctx.data().memory.lock() {
+        Ok(mut memory) => memory.remember_fact(&scope, &user_id, fact.clone())?,
+        Err(_) => return Err("VxMem lock is poisoned".into()),
+    }
+
+    ctx.say("remembered.").await?;
+    info!(user = %user_id, "Stored long-term VxMem fact");
     Ok(())
 }
 
@@ -192,9 +293,24 @@ async fn ask(
 ) -> Result<(), Error> {
     ctx.defer().await?;
 
-    match ctx.data().huggingface.chat(&ctx.data().system_prompt, &prompt).await {
+    let scope = format!("channel:{}", ctx.channel_id().get());
+    let user_id = ctx.author().id.get().to_string();
+    let prompt_with_memory = {
+        let memory = ctx.data().memory.lock().map_err(|_| "VxMem lock is poisoned")?;
+        build_prompt(&memory, &scope, &user_id, &prompt)
+    };
+
+    remember_message(&ctx.data().memory, &scope, &user_id, "user", &prompt);
+
+    match ctx
+        .data()
+        .huggingface
+        .chat(&ctx.data().system_prompt, &prompt_with_memory)
+        .await
+    {
         Ok(answer) => {
             let answer = truncate_for_discord(&answer);
+            remember_message(&ctx.data().memory, &scope, &user_id, "assistant", &answer);
             ctx.say(answer).await?;
         }
         Err(err) => {
@@ -232,6 +348,7 @@ async fn main() -> Result<(), Error> {
     let huggingface = Arc::new(HuggingFaceClient::from_env()?);
     let ai_channel_ids = load_ai_channel_ids()?;
     let system_prompt = Arc::new(load_system_prompt()?);
+    let memory = Arc::new(Mutex::new(load_memory_store()?));
 
     if ai_channel_ids.is_empty() {
         info!("AI mention replies are disabled because AI_CHANNEL_IDS is empty");
@@ -241,7 +358,7 @@ async fn main() -> Result<(), Error> {
 
     let intents = serenity::GatewayIntents::non_privileged()
         | serenity::GatewayIntents::MESSAGE_CONTENT;
-    let commands = vec![ping(), ask()];
+    let commands = vec![ping(), ask(), remember()];
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -265,34 +382,46 @@ async fn main() -> Result<(), Error> {
 
                     let bot_id = _ctx.cache.current_user().id;
                     let mentioned = new_message.mentions.iter().any(|user| user.id == bot_id);
-                    let Some(guild_id) = new_message.guild_id else {
-                        if !new_message.content.trim().is_empty() {
-                            let typing = new_message.channel_id.start_typing(&_ctx.http);
-                            let response = tokio::time::timeout(
-                                Duration::from_secs(45),
-                                data.huggingface.chat(&data.system_prompt, &new_message.content),
-                            )
-                            .await;
-                            typing.stop();
+                    let scope = conversation_scope(&new_message);
+                    let user_id = new_message.author.id.get().to_string();
 
-                            match response {
-                                Ok(Ok(answer)) => {
-                                    new_message
-                                        .reply_mention(_ctx, truncate_for_discord(&answer))
-                                        .await?;
-                                }
-                                Ok(Err(err)) => {
-                                    error!(error = %err, "Hugging Face DM reply failed");
-                                    new_message
-                                        .reply_mention(_ctx, "the ai provider fucked up. check the logs.")
-                                        .await?;
-                                }
-                                Err(_) => {
-                                    error!("Hugging Face DM reply timed out after 45 seconds");
-                                    new_message
-                                        .reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?")
-                                        .await?;
-                                }
+                    let Some(_guild_id) = new_message.guild_id else {
+                        if new_message.content.trim().is_empty() {
+                            return Ok(());
+                        }
+
+                        let prompt = new_message.content.clone();
+                        let prompt_with_memory = {
+                            let memory = data.memory.lock().map_err(|_| "VxMem lock is poisoned")?;
+                            build_prompt(&memory, &scope, &user_id, &prompt)
+                        };
+                        remember_message(&data.memory, &scope, &user_id, "user", &prompt);
+
+                        let typing = new_message.channel_id.start_typing(&_ctx.http);
+                        let response = tokio::time::timeout(
+                            Duration::from_secs(45),
+                            data.huggingface.chat(&data.system_prompt, &prompt_with_memory),
+                        )
+                        .await;
+                        typing.stop();
+
+                        match response {
+                            Ok(Ok(answer)) => {
+                                let answer = truncate_for_discord(&answer);
+                                remember_message(&data.memory, &scope, &user_id, "assistant", &answer);
+                                new_message.reply_mention(_ctx, answer).await?;
+                            }
+                            Ok(Err(err)) => {
+                                error!(error = %err, "Hugging Face DM reply failed");
+                                new_message
+                                    .reply_mention(_ctx, "the ai provider fucked up. check the logs.")
+                                    .await?;
+                            }
+                            Err(_) => {
+                                error!("Hugging Face DM reply timed out after 45 seconds");
+                                new_message
+                                    .reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?")
+                                    .await?;
                             }
                         }
                         return Ok(());
@@ -319,11 +448,16 @@ async fn main() -> Result<(), Error> {
                     } else {
                         prompt
                     };
+                    let prompt_with_memory = {
+                        let memory = data.memory.lock().map_err(|_| "VxMem lock is poisoned")?;
+                        build_prompt(&memory, &scope, &user_id, &prompt)
+                    };
+                    remember_message(&data.memory, &scope, &user_id, "user", &prompt);
 
                     let typing = new_message.channel_id.start_typing(&_ctx.http);
                     let response = tokio::time::timeout(
                         Duration::from_secs(45),
-                        data.huggingface.chat(&data.system_prompt, &prompt),
+                        data.huggingface.chat(&data.system_prompt, &prompt_with_memory),
                     )
                     .await;
                     typing.stop();
@@ -331,6 +465,7 @@ async fn main() -> Result<(), Error> {
                     match response {
                         Ok(Ok(answer)) => {
                             let answer = truncate_for_discord(&answer);
+                            remember_message(&data.memory, &scope, &user_id, "assistant", &answer);
                             new_message.reply_mention(_ctx, answer).await?;
                         }
                         Ok(Err(err)) => {
@@ -356,9 +491,11 @@ async fn main() -> Result<(), Error> {
             let huggingface = Arc::clone(&huggingface);
             let ai_channel_ids = ai_channel_ids.clone();
             let system_prompt = Arc::clone(&system_prompt);
+            let memory = Arc::clone(&memory);
             Box::pin(async move {
                 info!(user = %ready.user.name, "Connected to Discord");
                 info!(guilds = ready.guilds.len(), "Bot is serving guilds");
+                info!(path = ?memory.lock().map_err(|_| "VxMem lock is poisoned")?.path(), "VxMem loaded");
 
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
 
@@ -366,6 +503,7 @@ async fn main() -> Result<(), Error> {
                     huggingface,
                     ai_channel_ids,
                     system_prompt,
+                    memory,
                 })
             })
         })
