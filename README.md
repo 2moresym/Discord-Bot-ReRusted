@@ -1,6 +1,6 @@
 # Discord Bot ReRusted 🦀
 
-A Discord bot rebuilt in Rust with **Poise** and a Hugging Face Inference Providers AI backend.
+A Discord bot rebuilt in Rust with Poise and a Hugging Face Inference Providers AI backend.
 
 ## Current commands
 
@@ -40,14 +40,16 @@ Because Discord message text is delivered through the **Message Content** gatewa
 
 Vaxxer has a local memory store named **VxMem** using the custom `.vxm` format.
 
-By default:
+By default, for this project we recommend keeping it outside the repository:
 
 ```env
-VXM_PATH=memory.vxm
-VXM_HISTORY_LIMIT=8
+VXM_PATH=/home/vexx/.local/share/rerusted/memory.vxm
+VXM_HISTORY_LIMIT=50
 ```
 
-The `.vxm` file stores recent conversation messages separately for each DM/user or guild channel, plus explicit long-term facts created with `/remember`.
+The `.vxm` file stores recent conversation messages separately for each DM/user or guild channel, plus long-term facts. User messages that look like durable personal facts are automatically promoted to long-term memory without making another AI request.
+
+VXM/2 is human-readable. Strings use normal quoted/escaped text so the file can be inspected and edited in a text editor. Existing VXM/1 files are still readable and are converted to VXM/2 the next time VxMem saves.
 
 The file is local-only and is intentionally ignored by Git. It is written through a temporary file and rename so a partial write is less likely to destroy the existing memory file.
 
@@ -84,8 +86,8 @@ DISCORD_TOKEN=your_discord_token
 HF_TOKEN=your_huggingface_token
 HF_MODEL=openai/gpt-oss-120b:fastest
 AI_CHANNEL_IDS=123456789012345678,987654321098765432
-VXM_PATH=memory.vxm
-VXM_HISTORY_LIMIT=8
+VXM_PATH=/home/vexx/.local/share/rerusted/memory.vxm
+VXM_HISTORY_LIMIT=50
 AI_CONTEXT_FILE=context.md
 ```
 
