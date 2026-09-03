@@ -5,7 +5,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const MAGIC: &str = "VXM/1";
+const MAGIC_V1: &str = "VXM/1";
+const MAGIC_V2: &str = "VXM/2";
 const DEFAULT_HISTORY_LIMIT: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,93 +48,27 @@ impl MemoryStore {
 
         let contents = fs::read_to_string(&path)?;
         let mut lines = contents.lines();
-        match lines.next() {
-            Some(MAGIC) | None => {}
-            Some(other) => {
+        let version = lines.next().unwrap_or(MAGIC_V1);
+
+        let (messages, memories) = match version {
+            MAGIC_V1 => parse_v1(lines)?,
+            MAGIC_V2 => parse_v2(lines)?,
+            other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported VxMem header: {other}"),
                 ));
             }
-        }
+        };
 
-        let mut messages = Vec::new();
-        let mut memories = Vec::new();
-        let mut current_kind: Option<&str> = None;
-        let mut scope = String::new();
-        let mut user_id = String::new();
-        let mut role = String::new();
-        let mut timestamp = 0_u64;
-        let mut content = String::new();
-
-        for line in lines {
-            match line {
-                "[message]" => {
-                    current_kind = Some("message");
-                    scope.clear();
-                    user_id.clear();
-                    role.clear();
-                    timestamp = 0;
-                    content.clear();
-                }
-                "[memory]" => {
-                    current_kind = Some("memory");
-                    scope.clear();
-                    user_id.clear();
-                    role.clear();
-                    timestamp = 0;
-                    content.clear();
-                }
-                "[/message]" => {
-                    if current_kind == Some("message") {
-                        messages.push(MemoryMessage {
-                            scope: scope.clone(),
-                            user_id: user_id.clone(),
-                            role: role.clone(),
-                            timestamp,
-                            content: decode(&content).map_err(invalid_data)?,
-                        });
-                    }
-                    current_kind = None;
-                }
-                "[/memory]" => {
-                    if current_kind == Some("memory") {
-                        memories.push(LongTermMemory {
-                            scope: scope.clone(),
-                            user_id: user_id.clone(),
-                            timestamp,
-                            content: decode(&content).map_err(invalid_data)?,
-                        });
-                    }
-                    current_kind = None;
-                }
-                line if current_kind.is_some() => {
-                    if let Some((key, value)) = line.split_once('=') {
-                        match key {
-                            "scope" => scope = decode(value).map_err(invalid_data)?,
-                            "user_id" => user_id = decode(value).map_err(invalid_data)?,
-                            "role" => role = decode(value).map_err(invalid_data)?,
-                            "timestamp" => {
-                                timestamp = value.parse().map_err(invalid_data)?;
-                            }
-                            "content" => content = value.to_owned(),
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        messages.sort_by_key(|message| message.timestamp);
-        memories.sort_by_key(|memory| memory.timestamp);
-
-        Ok(Self {
+        let mut store = Self {
             path,
             history_limit: history_limit.max(1),
             messages,
             memories,
-        })
+        };
+        store.compact_messages();
+        Ok(store)
     }
 
     pub fn path(&self) -> &Path {
@@ -258,31 +193,184 @@ impl MemoryStore {
     fn save(&self) -> io::Result<()> {
         let temp = self.path.with_extension("vxm.tmp");
         let mut file = fs::File::create(&temp)?;
-        writeln!(file, "{MAGIC}")?;
+        writeln!(file, "{MAGIC_V2}")?;
+        writeln!(file, "# VxMem human-readable local memory store")?;
 
         for message in &self.messages {
             writeln!(file, "[message]")?;
-            writeln!(file, "scope={}", encode(&message.scope))?;
-            writeln!(file, "user_id={}", encode(&message.user_id))?;
-            writeln!(file, "role={}", encode(&message.role))?;
+            writeln!(file, "scope={}", quote(&message.scope))?;
+            writeln!(file, "user_id={}", quote(&message.user_id))?;
+            writeln!(file, "role={}", quote(&message.role))?;
             writeln!(file, "timestamp={}", message.timestamp)?;
-            writeln!(file, "content={}", encode(&message.content))?;
+            writeln!(file, "content={}", quote(&message.content))?;
             writeln!(file, "[/message]")?;
+            writeln!(file)?;
         }
 
         for memory in &self.memories {
             writeln!(file, "[memory]")?;
-            writeln!(file, "scope={}", encode(&memory.scope))?;
-            writeln!(file, "user_id={}", encode(&memory.user_id))?;
+            writeln!(file, "scope={}", quote(&memory.scope))?;
+            writeln!(file, "user_id={}", quote(&memory.user_id))?;
             writeln!(file, "timestamp={}", memory.timestamp)?;
-            writeln!(file, "content={}", encode(&memory.content))?;
+            writeln!(file, "content={}", quote(&memory.content))?;
             writeln!(file, "[/memory]")?;
+            writeln!(file)?;
         }
 
         file.flush()?;
         drop(file);
         fs::rename(temp, &self.path)
     }
+}
+
+fn parse_v1<'a, I>(lines: I) -> io::Result<(Vec<MemoryMessage>, Vec<LongTermMemory>)>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut messages = Vec::new();
+    let mut memories = Vec::new();
+    let mut current_kind: Option<&str> = None;
+    let mut scope = String::new();
+    let mut user_id = String::new();
+    let mut role = String::new();
+    let mut timestamp = 0_u64;
+    let mut content = String::new();
+
+    for line in lines {
+        match line {
+            "[message]" => {
+                current_kind = Some("message");
+                scope.clear();
+                user_id.clear();
+                role.clear();
+                timestamp = 0;
+                content.clear();
+            }
+            "[memory]" => {
+                current_kind = Some("memory");
+                scope.clear();
+                user_id.clear();
+                role.clear();
+                timestamp = 0;
+                content.clear();
+            }
+            "[/message]" => {
+                if current_kind == Some("message") {
+                    messages.push(MemoryMessage {
+                        scope: scope.clone(),
+                        user_id: user_id.clone(),
+                        role: role.clone(),
+                        timestamp,
+                        content: decode_v1(&content).map_err(invalid_data)?,
+                    });
+                }
+                current_kind = None;
+            }
+            "[/memory]" => {
+                if current_kind == Some("memory") {
+                    memories.push(LongTermMemory {
+                        scope: scope.clone(),
+                        user_id: user_id.clone(),
+                        timestamp,
+                        content: decode_v1(&content).map_err(invalid_data)?,
+                    });
+                }
+                current_kind = None;
+            }
+            line if current_kind.is_some() => {
+                if let Some((key, value)) = line.split_once('=') {
+                    match key {
+                        "scope" => scope = decode_v1(value).map_err(invalid_data)?,
+                        "user_id" => user_id = decode_v1(value).map_err(invalid_data)?,
+                        "role" => role = decode_v1(value).map_err(invalid_data)?,
+                        "timestamp" => timestamp = value.parse().map_err(invalid_data)?,
+                        "content" => content = value.to_owned(),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok((messages, memories))
+}
+
+fn parse_v2<'a, I>(lines: I) -> io::Result<(Vec<MemoryMessage>, Vec<LongTermMemory>)>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut messages = Vec::new();
+    let mut memories = Vec::new();
+    let mut current_kind: Option<&str> = None;
+    let mut scope = String::new();
+    let mut user_id = String::new();
+    let mut role = String::new();
+    let mut timestamp = 0_u64;
+    let mut content = String::new();
+
+    for line in lines {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        match line {
+            "[message]" => {
+                current_kind = Some("message");
+                scope.clear();
+                user_id.clear();
+                role.clear();
+                timestamp = 0;
+                content.clear();
+            }
+            "[memory]" => {
+                current_kind = Some("memory");
+                scope.clear();
+                user_id.clear();
+                role.clear();
+                timestamp = 0;
+                content.clear();
+            }
+            "[/message]" => {
+                if current_kind == Some("message") {
+                    messages.push(MemoryMessage {
+                        scope: scope.clone(),
+                        user_id: user_id.clone(),
+                        role: role.clone(),
+                        timestamp,
+                        content: content.clone(),
+                    });
+                }
+                current_kind = None;
+            }
+            "[/memory]" => {
+                if current_kind == Some("memory") {
+                    memories.push(LongTermMemory {
+                        scope: scope.clone(),
+                        user_id: user_id.clone(),
+                        timestamp,
+                        content: content.clone(),
+                    });
+                }
+                current_kind = None;
+            }
+            line if current_kind.is_some() => {
+                if let Some((key, value)) = line.split_once('=') {
+                    match key {
+                        "scope" => scope = unquote(value).map_err(invalid_data)?,
+                        "user_id" => user_id = unquote(value).map_err(invalid_data)?,
+                        "role" => role = unquote(value).map_err(invalid_data)?,
+                        "timestamp" => timestamp = value.parse().map_err(invalid_data)?,
+                        "content" => content = unquote(value).map_err(invalid_data)?,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok((messages, memories))
 }
 
 fn should_auto_remember(text: &str) -> bool {
@@ -322,15 +410,61 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-fn encode(value: &str) -> String {
-    value
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("%{byte:02X}"))
-        .collect()
+fn quote(value: &str) -> String {
+    let mut result = String::with_capacity(value.len() + 2);
+    result.push('"');
+
+    for character in value.chars() {
+        match character {
+            '\\' => result.push_str("\\\\"),
+            '"' => result.push_str("\\\""),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            character => result.push(character),
+        }
+    }
+
+    result.push('"');
+    result
 }
 
-fn decode(value: &str) -> Result<String, &'static str> {
+fn unquote(value: &str) -> Result<String, &'static str> {
+    let value = value.trim();
+    if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
+        return Err("VxMem string must be enclosed in quotes");
+    }
+
+    let inner = &value[1..value.len() - 1];
+    let mut result = String::with_capacity(inner.len());
+    let mut escaped = false;
+
+    for character in inner.chars() {
+        if escaped {
+            result.push(match character {
+                '\\' => '\\',
+                '"' => '"',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                _ => return Err("invalid VxMem escape sequence"),
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            result.push(character);
+        }
+    }
+
+    if escaped {
+        return Err("unterminated VxMem escape sequence");
+    }
+
+    Ok(result)
+}
+
+fn decode_v1(value: &str) -> Result<String, &'static str> {
     let bytes = value.as_bytes();
     if bytes.len() % 3 != 0 {
         return Err("invalid VxMem escape sequence length");
