@@ -265,6 +265,38 @@ async fn main() -> Result<(), Error> {
 
                     let bot_id = _ctx.cache.current_user().id;
                     let mentioned = new_message.mentions.iter().any(|user| user.id == bot_id);
+                    let Some(guild_id) = new_message.guild_id else {
+                        if !new_message.content.trim().is_empty() {
+                            let typing = new_message.channel_id.start_typing(&_ctx.http);
+                            let response = tokio::time::timeout(
+                                Duration::from_secs(45),
+                                data.huggingface.chat(&data.system_prompt, &new_message.content),
+                            )
+                            .await;
+                            typing.stop();
+
+                            match response {
+                                Ok(Ok(answer)) => {
+                                    new_message
+                                        .reply_mention(_ctx, truncate_for_discord(&answer))
+                                        .await?;
+                                }
+                                Ok(Err(err)) => {
+                                    error!(error = %err, "Hugging Face DM reply failed");
+                                    new_message
+                                        .reply_mention(_ctx, "the ai provider fucked up. check the logs.")
+                                        .await?;
+                                }
+                                Err(_) => {
+                                    error!("Hugging Face DM reply timed out after 45 seconds");
+                                    new_message
+                                        .reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?")
+                                        .await?;
+                                }
+                            }
+                        }
+                        return Ok(());
+                    };
 
                     if !mentioned {
                         return Ok(());
@@ -304,19 +336,13 @@ async fn main() -> Result<(), Error> {
                         Ok(Err(err)) => {
                             error!(error = %err, "Hugging Face mention reply failed");
                             new_message
-                                .reply_mention(
-                                    _ctx,
-                                    "the ai provider fucked up. check the logs.",
-                                )
+                                .reply_mention(_ctx, "the ai provider fucked up. check the logs.")
                                 .await?;
                         }
                         Err(_) => {
                             error!("Hugging Face mention reply timed out after 45 seconds");
                             new_message
-                                .reply_mention(
-                                    _ctx,
-                                    "the ai took too long to answer. what the fuck happened?",
-                                )
+                                .reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?")
                                 .await?;
                         }
                     }
