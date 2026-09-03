@@ -327,7 +327,9 @@ async fn ask(
     )
     .await
     {
-        Ok(answer) => ctx.say(answer).await?,
+        Ok(answer) => {
+            ctx.say(answer).await?;
+        }
         Err(err) => {
             error!(error = %err, "Cerebras slash-command request failed");
             ctx.say("the ai provider fucked up. check the logs.").await?;
