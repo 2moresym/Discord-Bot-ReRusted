@@ -148,13 +148,18 @@ fn load_system_prompt() -> Result<String, Error> {
 }
 
 fn load_memory_store() -> Result<MemoryStore, Error> {
-    let path = env::var("VXM_PATH").unwrap_or_else(|_| "memory.vxm".to_owned());
+    let path = env::var("VXM_PATH")
+        .unwrap_or_else(|_| "/home/vexx/.local/share/rerusted/memory.vxm".to_owned());
     let history_limit = env::var("VXM_HISTORY_LIMIT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(8);
+        .unwrap_or(50);
+    let max_messages = env::var("VXM_MAX_MESSAGES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10_000);
 
-    Ok(MemoryStore::load(path, history_limit)?)
+    Ok(MemoryStore::load(path, history_limit, max_messages)?)
 }
 
 fn strip_bot_mention(content: &str, bot_id: serenity::UserId) -> String {
@@ -201,47 +206,18 @@ fn conversation_scope(message: &serenity::Message) -> String {
     }
 }
 
-fn build_memory_context(memory: &MemoryStore, scope: &str, user_id: &str) -> String {
-    let recent = memory.recent_context(scope);
-    let long_term = memory.memories_for(scope, user_id);
-
-    let mut context = String::new();
-
-    if !long_term.is_empty() {
-        context.push_str("Known memories:\n");
-        for item in long_term.iter().rev().take(12).rev() {
-            context.push_str("- ");
-            context.push_str(&item.content);
-            context.push('\n');
-        }
-    }
-
-    if !recent.is_empty() {
-        if !context.is_empty() {
-            context.push('\n');
-        }
-        context.push_str("Recent conversation:\n");
-        for item in recent {
-            context.push_str(match item.role.as_str() {
-                "assistant" => "Vaxxer: ",
-                _ => "User: ",
-            });
-            context.push_str(&item.content);
-            context.push('\n');
-        }
-    }
-
-    context
+fn build_memory_context(memory: &MemoryStore, scope: &str, user_id: &str, prompt: &str) -> String {
+    memory.relevant_context(scope, user_id, prompt, 12, 16, 14_000)
 }
 
 fn build_prompt(memory: &MemoryStore, scope: &str, user_id: &str, prompt: &str) -> String {
-    let memory_context = build_memory_context(memory, scope, user_id);
+    let memory_context = build_memory_context(memory, scope, user_id, prompt);
     if memory_context.is_empty() {
         return prompt.to_owned();
     }
 
     format!(
-        "Use the following memory only when relevant. Do not mention the memory system unless asked.\n\n{memory_context}\nCurrent message:\n{prompt}"
+        "Use the following retrieved memory only when relevant. Do not mention the memory system unless asked.\n\n{memory_context}\nCurrent message:\n{prompt}"
     )
 }
 
@@ -409,19 +385,15 @@ async fn main() -> Result<(), Error> {
                             Ok(Ok(answer)) => {
                                 let answer = truncate_for_discord(&answer);
                                 remember_message(&data.memory, &scope, &user_id, "assistant", &answer);
-                                new_message.reply_mention(_ctx, answer).await?;
+                                new_message.channel_id.say(&_ctx.http, &answer).await?;
                             }
                             Ok(Err(err)) => {
                                 error!(error = %err, "Hugging Face DM reply failed");
-                                new_message
-                                    .reply_mention(_ctx, "the ai provider fucked up. check the logs.")
-                                    .await?;
+                                new_message.channel_id.say(&_ctx.http, "the ai provider fucked up. check the logs.").await?;
                             }
                             Err(_) => {
                                 error!("Hugging Face DM reply timed out after 45 seconds");
-                                new_message
-                                    .reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?")
-                                    .await?;
+                                new_message.channel_id.say(&_ctx.http, "the ai took too long to answer. what the fuck happened?").await?;
                             }
                         }
                         return Ok(());
@@ -470,15 +442,11 @@ async fn main() -> Result<(), Error> {
                         }
                         Ok(Err(err)) => {
                             error!(error = %err, "Hugging Face mention reply failed");
-                            new_message
-                                .reply_mention(_ctx, "the ai provider fucked up. check the logs.")
-                                .await?;
+                            new_message.reply_mention(_ctx, "the ai provider fucked up. check the logs.").await?;
                         }
                         Err(_) => {
                             error!("Hugging Face mention reply timed out after 45 seconds");
-                            new_message
-                                .reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?")
-                                .await?;
+                            new_message.reply_mention(_ctx, "the ai took too long to answer. what the fuck happened?").await?;
                         }
                     }
 
